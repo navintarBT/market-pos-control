@@ -1,0 +1,88 @@
+:root {
+  /* Sidebar */
+  --sidebar-bg:          #0F2033;
+  --sidebar-bg-hover:    rgba(14, 165, 160, 0.08);
+  --sidebar-active:      rgba(14, 165, 160, 0.18);
+  --sidebar-text:        #7A9EBA;
+  --sidebar-text-active: #FFFFFF;
+  --sidebar-border:      rgba(255, 255, 255, 0.06);
+
+  /* Main content */
+  --bg:       #F4F7FB;
+  --surf:     #FFFFFF;
+  --surf2:    #EEF3F9;
+  --border:   #E2EAF2;
+  --border-l: #D0DDE9;
+
+  /* Accent — Teal */
+  --accent:      #0EA5A0;
+  --accent-dark: #0C8F8A;
+  --accent-bg:   rgba(14, 165, 160, 0.10);
+  --accent-text: #FFFFFF;
+
+  /* Text */
+  --text:    #0F2033;
+  --text-2:  #4A6580;
+  --muted:   #8BAEC8;
+
+  /* Semantic */
+  --green:      #10B981;
+  --green-bg:   rgba(16, 185, 129, 0.10);
+  --yellow:     #F59E0B;
+  --yellow-bg:  rgba(245, 158, 11, 0.10);
+  --red:        #EF4444;
+  --red-bg:     rgba(239, 68, 68, 0.10);
+  --blue:       #3B82F6;
+  --blue-bg:    rgba(59, 130, 246, 0.10);
+
+  --font: 'Noto Sans Lao', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'Consolas', 'Courier New', monospace;
+
+  --sidebar-w: 240px;
+  --radius: 10px;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+input, select, textarea {
+  font-family: inherit;
+  font-size: 14px;
+}
+
+/* Spinner */
+.spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-l); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
