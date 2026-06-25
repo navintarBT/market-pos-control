@@ -124,7 +124,7 @@ export default function Login() {
                 type="email"
                 value={email}
                 onChange={e => setEmail(e.target.value)}
-                placeholder="admin@example.com"
+                placeholder="Enter admin email"
                 required
                 style={{
                   width: "100%", padding: "10px 14px",
@@ -149,7 +149,7 @@ export default function Login() {
                   type={showPass ? "text" : "password"}
                   value={password}
                   onChange={e => setPassword(e.target.value)}
-                  placeholder="••••••••"
+                  placeholder="password"
                   required
                   style={{
                     width: "100%", padding: "10px 40px 10px 14px",

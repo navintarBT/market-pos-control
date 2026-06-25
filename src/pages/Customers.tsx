@@ -1,15 +1,18 @@
 import { useEffect, useState, useRef } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   collection, getDocs, query, orderBy,
   doc, updateDoc, serverTimestamp, writeBatch, Timestamp,
 } from "firebase/firestore";
-import { db } from "../firebase";
+import { sendPasswordResetEmail } from "firebase/auth";
+import { db, auth } from "../firebase";
 
 interface Tenant {
   id: string;
   shopName: string;
   ownerEmail: string;
   plan: "trial" | "monthly" | "yearly";
+  duration: number;
   status: "active" | "trial" | "suspended" | "cancelled";
   createdAt: Date;
 }
@@ -21,19 +24,32 @@ const STATUS_CFG = {
   cancelled: { label: "ຍົກເລີກ",   color: "var(--muted)",  bg: "var(--surf2)"     },
 };
 
-const PLAN_LABEL: Record<string, string> = {
-  trial: "ທົດລອງໃຊ້ (30 ວັນ)",
-  monthly: "ລາຍເດືອນ",
-  yearly: "ລາຍປີ",
-};
+function planLabel(plan: string, duration: number): string {
+  if (plan === "monthly") return `ລາຍເດືອນ · ${duration} ເດືອນ`;
+  if (plan === "yearly") return `ລາຍປີ · ${duration} ປີ`;
+  return "ທົດລອງໃຊ້ (30 ວັນ)";
+}
+
+function planEndsAt(plan: string, duration: number): Date {
+  const d = new Date();
+  if (plan === "monthly") d.setMonth(d.getMonth() + duration);
+  else if (plan === "yearly") d.setFullYear(d.getFullYear() + duration);
+  else d.setDate(d.getDate() + 30);
+  return d;
+}
+
+const MONTHLY_DURATIONS = [1, 3, 6, 9];
+const YEARLY_DURATIONS  = [1, 3, 5];
 
 export default function Customers() {
+  const navigate = useNavigate();
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterStatus, setFilterStatus] = useState("all");
   const [search, setSearch] = useState("");
   const [showModal, setShowModal] = useState(false);
   const [actionId, setActionId] = useState<string | null>(null);
+  const [editTenant, setEditTenant] = useState<Tenant | null>(null);
 
   async function loadTenants() {
     setLoading(true);
@@ -42,6 +58,7 @@ export default function Customers() {
       setTenants(snap.docs.map(d => ({
         id: d.id,
         ...(d.data() as Omit<Tenant, "id" | "createdAt">),
+        duration: d.data().duration ?? 1,
         createdAt: d.data().createdAt?.toDate?.() ?? new Date(),
       })));
     } catch {
@@ -170,7 +187,7 @@ export default function Customers() {
                     >
                       <td style={{ padding: "14px 20px", fontWeight: 600, color: "var(--text)" }}>{t.shopName}</td>
                       <td style={{ padding: "14px 20px", color: "var(--text-2)", fontSize: 13 }}>{t.ownerEmail}</td>
-                      <td style={{ padding: "14px 20px", color: "var(--text-2)", fontSize: 13 }}>{PLAN_LABEL[t.plan] ?? t.plan}</td>
+                      <td style={{ padding: "14px 20px", color: "var(--text-2)", fontSize: 13 }}>{planLabel(t.plan, t.duration)}</td>
                       <td style={{ padding: "14px 20px" }}>
                         <span style={{
                           display: "inline-block", fontSize: 12, fontWeight: 600,
@@ -183,6 +200,28 @@ export default function Customers() {
                       </td>
                       <td style={{ padding: "14px 20px" }}>
                         <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                          <button
+                            onClick={() => navigate(`/customers/${t.id}`)}
+                            style={{
+                              padding: "5px 12px", borderRadius: 6, fontSize: 12, fontWeight: 500,
+                              border: "1px solid var(--border)",
+                              background: "var(--surf2)", color: "var(--text-2)",
+                              cursor: "pointer",
+                            }}
+                          >
+                            ເບິ່ງ
+                          </button>
+                          <button
+                            onClick={() => setEditTenant(t)}
+                            style={{
+                              padding: "5px 12px", borderRadius: 6, fontSize: 12, fontWeight: 500,
+                              border: "1px solid rgba(59,130,246,.3)",
+                              background: "var(--blue-bg)", color: "var(--blue)",
+                              cursor: "pointer",
+                            }}
+                          >
+                            ແກ້ໄຂ
+                          </button>
                           <button
                             onClick={() => toggleSuspend(t)}
                             disabled={actionId === t.id}
@@ -222,6 +261,18 @@ export default function Customers() {
           onCreated={() => { setShowModal(false); loadTenants(); }}
         />
       )}
+
+      {/* Edit Customer Modal */}
+      {editTenant && (
+        <EditCustomerModal
+          tenant={editTenant}
+          onClose={() => setEditTenant(null)}
+          onSaved={(updated) => {
+            setTenants(prev => prev.map(t => t.id === updated.id ? updated : t));
+            setEditTenant(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -234,6 +285,7 @@ function AddCustomerModal({ onClose, onCreated }: { onClose: () => void; onCreat
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [plan, setPlan] = useState<"trial" | "monthly" | "yearly">("trial");
+  const [duration, setDuration] = useState(1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -246,7 +298,6 @@ function AddCustomerModal({ onClose, onCreated }: { onClose: () => void; onCreat
     setError("");
     setBusy(true);
     try {
-      // สร้าง Firebase Auth user ผ่าน REST API (ไม่กระทบ session ปัจจุบัน)
       const signUpRes = await fetch(
         `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${import.meta.env.VITE_FIREBASE_API_KEY}`,
         {
@@ -259,17 +310,13 @@ function AddCustomerModal({ onClose, onCreated }: { onClose: () => void; onCreat
       if (!signUpRes.ok) {
         const code: string = signUpData.error?.message ?? "CREATE_USER_FAILED";
         if (code === "EMAIL_EXISTS") throw new Error("ອີເມວນີ້ມີໃນລະບົບແລ້ວ");
-        if (code.startsWith("WEAK_PASSWORD")) throw new Error("ລະຫັດຜ່ານຕ້ອງມີຢ່າງໜ້ອຍ 6 ຕົວອັກສອນ");
         throw new Error(code);
       }
       const uid: string = signUpData.localId;
       const shopId = uid;
 
-      // เขียน Firestore ทั้งหมดใน batch เดียว
       const now = serverTimestamp();
-      const trialEndsAt = plan === "trial"
-        ? Timestamp.fromDate(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000))
-        : null;
+      const expiresAt = Timestamp.fromDate(planEndsAt(plan, duration));
 
       const batch = writeBatch(db);
       batch.set(doc(db, "users", uid), { role: "customer", shopId, email: email.trim() });
@@ -277,10 +324,9 @@ function AddCustomerModal({ onClose, onCreated }: { onClose: () => void; onCreat
       batch.set(doc(db, `shops/${shopId}/users`, uid), { role: "customer", email: email.trim(), createdAt: now });
       batch.set(doc(db, "tenants", shopId), {
         shopName: shopName.trim(), ownerEmail: email.trim(), ownerUid: uid,
-        plan, status: "trial", trialEndsAt, createdAt: now,
+        plan, duration, status: plan === "trial" ? "trial" : "active", expiresAt, createdAt: now,
       });
       await batch.commit();
-
       onCreated();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "ເກີດຂໍ້ຜິດພາດ";
@@ -332,17 +378,243 @@ function AddCustomerModal({ onClose, onCreated }: { onClose: () => void; onCreat
           </Field>
           <Field label="ອີເມວ" required>
             <input type="email" value={email} onChange={e => setEmail(e.target.value)}
-              placeholder="owner@example.com" required style={inputStyle} />
+              placeholder="Customer email" required style={inputStyle} />
           </Field>
-          <Field label="ລະຫັດຜ່ານເລີ່ມຕົ້ນ" required>
-            <input type="text" value={password} onChange={e => setPassword(e.target.value)}
-              placeholder="ຢ່າງໜ້ອຍ 8 ຕົວອັກສອນ" minLength={8} required style={inputStyle} />
+          <Field label="ລະຫັດຜ່ານ" required>
+            <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+              placeholder="ຕັ້ງລະຫັດໃຫ້ customer" required minLength={8} style={inputStyle} />
           </Field>
           <Field label="ແພັກເກດ">
-            <select value={plan} onChange={e => setPlan(e.target.value as typeof plan)} style={inputStyle}>
+            <select value={plan} onChange={e => { setPlan(e.target.value as typeof plan); setDuration(1); }} style={inputStyle}>
               <option value="trial">ທົດລອງໃຊ້ 30 ວັນ (ຟຣີ)</option>
               <option value="monthly">ລາຍເດືອນ</option>
               <option value="yearly">ລາຍປີ</option>
+            </select>
+          </Field>
+          {plan === "monthly" && (
+            <Field label="ຈຳນວນເດືອນ">
+              <div style={{ display: "flex", gap: 8 }}>
+                {MONTHLY_DURATIONS.map(m => (
+                  <button key={m} type="button" onClick={() => setDuration(m)}
+                    style={{ flex: 1, padding: "8px 0", borderRadius: 7, fontSize: 13, fontWeight: 600,
+                      border: `1.5px solid ${duration === m ? "var(--accent)" : "var(--border)"}`,
+                      background: duration === m ? "var(--accent-bg)" : "var(--surf2)",
+                      color: duration === m ? "var(--accent)" : "var(--text-2)", cursor: "pointer" }}>
+                    {m}
+                  </button>
+                ))}
+              </div>
+            </Field>
+          )}
+          {plan === "yearly" && (
+            <Field label="ຈຳນວນປີ">
+              <div style={{ display: "flex", gap: 8 }}>
+                {YEARLY_DURATIONS.map(y => (
+                  <button key={y} type="button" onClick={() => setDuration(y)}
+                    style={{ flex: 1, padding: "8px 0", borderRadius: 7, fontSize: 13, fontWeight: 600,
+                      border: `1.5px solid ${duration === y ? "var(--accent)" : "var(--border)"}`,
+                      background: duration === y ? "var(--accent-bg)" : "var(--surf2)",
+                      color: duration === y ? "var(--accent)" : "var(--text-2)", cursor: "pointer" }}>
+                    {y}
+                  </button>
+                ))}
+              </div>
+            </Field>
+          )}
+
+          {error && (
+            <div style={{ padding: "10px 14px", marginBottom: 16, background: "var(--red-bg)", border: "1px solid rgba(239,68,68,.25)", borderRadius: 8, fontSize: 13, color: "var(--red)" }}>
+              {error}
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+            <button type="button" onClick={onClose}
+              style={{ flex: 1, padding: "10px", border: "1.5px solid var(--border)", borderRadius: 8, background: "none", fontSize: 14, fontWeight: 500, color: "var(--text-2)", cursor: "pointer" }}>
+              ຍົກເລີກ
+            </button>
+            <button type="submit" disabled={busy}
+              style={{ flex: 1, padding: "10px", border: "none", borderRadius: 8, background: busy ? "var(--muted)" : "var(--accent)", fontSize: 14, fontWeight: 600, color: "#fff", cursor: busy ? "not-allowed" : "pointer", transition: "background .15s" }}>
+              {busy ? "ກຳລັງສ້າງ..." : "ສ້າງບັນຊີ"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ─── Edit Customer Modal ───────────────────────────────────────────────
+
+function EditCustomerModal({ tenant, onClose, onSaved }: {
+  tenant: Tenant;
+  onClose: () => void;
+  onSaved: (updated: Tenant) => void;
+}) {
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const [shopName, setShopName] = useState(tenant.shopName);
+  const [ownerEmail, setOwnerEmail] = useState(tenant.ownerEmail);
+  const [plan, setPlan] = useState<Tenant["plan"]>(tenant.plan);
+  const [duration, setDuration] = useState(tenant.duration ?? 1);
+  const [status, setStatus] = useState<Tenant["status"]>(tenant.status);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  function handleOverlayClick(e: React.MouseEvent) {
+    if (e.target === overlayRef.current) onClose();
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!shopName.trim() || !ownerEmail.trim()) return;
+    setError(""); setBusy(true);
+    try {
+      const shopId = tenant.id;
+      const newEmail = ownerEmail.trim().toLowerCase();
+      const emailChanged = newEmail !== tenant.ownerEmail.toLowerCase();
+
+      if (emailChanged) {
+        // Create new Auth user with new email
+        const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        const rand = new Uint8Array(16);
+        crypto.getRandomValues(rand);
+        const tempPassword = Array.from(rand, b => chars[b % 62]).join("") + "Aa1!";
+
+        const res = await fetch(
+          `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${import.meta.env.VITE_FIREBASE_API_KEY}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: newEmail, password: tempPassword, returnSecureToken: false }),
+          }
+        );
+        const json = await res.json();
+        if (!res.ok) {
+          const code: string = json.error?.message ?? "FAILED";
+          if (code === "EMAIL_EXISTS") throw new Error("ອີເມວນີ້ຖືກໃຊ້ແລ້ວ");
+          throw new Error(code);
+        }
+        const newUid: string = json.localId;
+        const now = serverTimestamp();
+
+        // Migrate: new uid points to same shopId — all shop data preserved
+        const batch = writeBatch(db);
+        batch.set(doc(db, "users", newUid), { role: "customer", shopId, email: newEmail, createdAt: now });
+        batch.set(doc(db, "shops", shopId, "users", newUid), { role: "customer", email: newEmail, createdAt: now });
+        batch.delete(doc(db, "users", tenant.id));
+        batch.delete(doc(db, "shops", shopId, "users", tenant.id));
+        const expiresAt = Timestamp.fromDate(planEndsAt(plan, duration));
+        batch.update(doc(db, "tenants", shopId), {
+          shopName: shopName.trim(), ownerEmail: newEmail, ownerUid: newUid,
+          plan, duration, expiresAt, status, updatedAt: now,
+        });
+        batch.update(doc(db, "shops", shopId), {
+          name: shopName.trim(), updatedAt: now,
+        });
+        await batch.commit();
+        await sendPasswordResetEmail(auth, newEmail);
+      } else {
+        const expiresAt = Timestamp.fromDate(planEndsAt(plan, duration));
+        const batch = writeBatch(db);
+        batch.update(doc(db, "tenants", shopId), {
+          shopName: shopName.trim(), plan, duration, expiresAt, status, updatedAt: serverTimestamp(),
+        });
+        batch.update(doc(db, "shops", shopId), {
+          name: shopName.trim(), updatedAt: serverTimestamp(),
+        });
+        await batch.commit();
+      }
+
+      onSaved({ ...tenant, shopName: shopName.trim(), ownerEmail: newEmail, plan, duration, status });
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "ເກີດຂໍ້ຜິດພາດ");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div ref={overlayRef} onClick={handleOverlayClick} style={{
+      position: "fixed", inset: 0, background: "rgba(10,22,40,.6)",
+      backdropFilter: "blur(3px)", display: "flex", alignItems: "center",
+      justifyContent: "center", zIndex: 200, padding: 20,
+    }}>
+      <div style={{
+        background: "var(--surf)", borderRadius: 14, width: "100%", maxWidth: 440,
+        boxShadow: "0 20px 60px rgba(0,0,0,.2)", overflow: "hidden",
+      }}>
+        <div style={{
+          padding: "20px 24px", borderBottom: "1px solid var(--border)",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+        }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text)" }}>ແກ້ໄຂຂໍ້ມູນລູກຄ້າ</div>
+            <div style={{ fontSize: 13, color: "var(--text-2)", marginTop: 2 }}>{tenant.ownerEmail}</div>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--muted)", padding: 4, borderRadius: 6, cursor: "pointer" }}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} style={{ padding: "24px" }}>
+          <Field label="ຊື່ຮ້ານຄ້າ" required>
+            <input type="text" value={shopName} onChange={e => setShopName(e.target.value)}
+              required style={inputStyle} />
+          </Field>
+          <Field label="ອີເມວເຈົ້າຂອງຮ້ານ" required>
+            <input type="email" value={ownerEmail} onChange={e => setOwnerEmail(e.target.value)}
+              required style={inputStyle} />
+            {ownerEmail.trim().toLowerCase() !== tenant.ownerEmail.toLowerCase() && (
+              <div style={{ marginTop: 6, fontSize: 12, color: "var(--yellow)" }}>
+                ⚠️ ປ່ຽນ email — Firebase ຈະສົ່ງ reset ລະຫັດໄປ email ໃໝ່ທັນທີ
+              </div>
+            )}
+          </Field>
+          <Field label="ແພັກເກດ">
+            <select value={plan} onChange={e => { setPlan(e.target.value as Tenant["plan"]); setDuration(1); }} style={inputStyle}>
+              <option value="trial">ທົດລອງໃຊ້ 30 ວັນ (ຟຣີ)</option>
+              <option value="monthly">ລາຍເດືອນ</option>
+              <option value="yearly">ລາຍປີ</option>
+            </select>
+          </Field>
+          {plan === "monthly" && (
+            <Field label="ຈຳນວນເດືອນ">
+              <div style={{ display: "flex", gap: 8 }}>
+                {MONTHLY_DURATIONS.map(m => (
+                  <button key={m} type="button" onClick={() => setDuration(m)}
+                    style={{ flex: 1, padding: "8px 0", borderRadius: 7, fontSize: 13, fontWeight: 600,
+                      border: `1.5px solid ${duration === m ? "var(--accent)" : "var(--border)"}`,
+                      background: duration === m ? "var(--accent-bg)" : "var(--surf2)",
+                      color: duration === m ? "var(--accent)" : "var(--text-2)", cursor: "pointer" }}>
+                    {m}
+                  </button>
+                ))}
+              </div>
+            </Field>
+          )}
+          {plan === "yearly" && (
+            <Field label="ຈຳນວນປີ">
+              <div style={{ display: "flex", gap: 8 }}>
+                {YEARLY_DURATIONS.map(y => (
+                  <button key={y} type="button" onClick={() => setDuration(y)}
+                    style={{ flex: 1, padding: "8px 0", borderRadius: 7, fontSize: 13, fontWeight: 600,
+                      border: `1.5px solid ${duration === y ? "var(--accent)" : "var(--border)"}`,
+                      background: duration === y ? "var(--accent-bg)" : "var(--surf2)",
+                      color: duration === y ? "var(--accent)" : "var(--text-2)", cursor: "pointer" }}>
+                    {y}
+                  </button>
+                ))}
+              </div>
+            </Field>
+          )}
+          <Field label="ສະຖານະ">
+            <select value={status} onChange={e => setStatus(e.target.value as Tenant["status"])} style={inputStyle}>
+              <option value="active">ໃຊ້ງານ</option>
+              <option value="trial">ທົດລອງໃຊ້</option>
+              <option value="suspended">ລະງັບ</option>
+              <option value="cancelled">ຍົກເລີກ</option>
             </select>
           </Field>
 
@@ -359,7 +631,7 @@ function AddCustomerModal({ onClose, onCreated }: { onClose: () => void; onCreat
             </button>
             <button type="submit" disabled={busy}
               style={{ flex: 1, padding: "10px", border: "none", borderRadius: 8, background: busy ? "var(--muted)" : "var(--accent)", fontSize: 14, fontWeight: 600, color: "#fff", cursor: busy ? "not-allowed" : "pointer", transition: "background .15s" }}>
-              {busy ? "ກຳລັງສ້າງ..." : "ສ້າງບັນຊີ"}
+              {busy ? "ກຳລັງບັນທຶກ..." : "ບັນທຶກ"}
             </button>
           </div>
         </form>
