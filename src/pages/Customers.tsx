@@ -15,6 +15,7 @@ interface Tenant {
   duration: number;
   status: "active" | "trial" | "suspended" | "cancelled";
   createdAt: Date;
+  expiresAt?: Date;
 }
 
 const STATUS_CFG = {
@@ -50,17 +51,34 @@ export default function Customers() {
   const [showModal, setShowModal] = useState(false);
   const [actionId, setActionId] = useState<string | null>(null);
   const [editTenant, setEditTenant] = useState<Tenant | null>(null);
+  const [setPlanTenant, setSetPlanTenant] = useState<Tenant | null>(null);
 
   async function loadTenants() {
     setLoading(true);
     try {
       const snap = await getDocs(query(collection(db, "tenants"), orderBy("createdAt", "desc")));
-      setTenants(snap.docs.map(d => ({
-        id: d.id,
-        ...(d.data() as Omit<Tenant, "id" | "createdAt">),
-        duration: d.data().duration ?? 1,
-        createdAt: d.data().createdAt?.toDate?.() ?? new Date(),
-      })));
+      setTenants(snap.docs.map(d => {
+        const raw = d.data();
+        const plan: string = raw.plan ?? "trial";
+        const duration: number = raw.duration ?? 1;
+        const createdAt: Date = raw.createdAt?.toDate?.() ?? new Date();
+
+        let expiresAt: Date | undefined = raw.expiresAt?.toDate?.() ?? undefined;
+        if (!expiresAt) {
+          expiresAt = new Date(createdAt);
+          if (plan === "monthly") expiresAt.setMonth(expiresAt.getMonth() + duration);
+          else if (plan === "yearly") expiresAt.setFullYear(expiresAt.getFullYear() + duration);
+          else expiresAt.setDate(expiresAt.getDate() + 30);
+        }
+
+        return {
+          id: d.id,
+          ...(raw as Omit<Tenant, "id" | "createdAt" | "expiresAt">),
+          duration,
+          createdAt,
+          expiresAt,
+        };
+      }));
     } catch {
       // empty
     } finally {
@@ -168,7 +186,7 @@ export default function Customers() {
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--border)", background: "var(--surf2)" }}>
-                  {["ຊື່ຮ້ານ", "ອີເມວເຈົ້າຂອງຮ້ານ", "ແພັກເກດ", "ສະຖານະ", "ວັນທີສະໝັກ", ""].map(h => (
+                  {["ຊື່ຮ້ານ", "ອີເມວເຈົ້າຂອງຮ້ານ", "ແພັກເກດ", "ສະຖານະ", "ວັນທີສະໝັກ", "ໝົດອາຍຸ", ""].map(h => (
                     <th key={h} style={{
                       padding: "11px 20px", textAlign: "left",
                       fontSize: 12, fontWeight: 600, letterSpacing: ".05em",
@@ -196,7 +214,10 @@ export default function Customers() {
                         }}>{cfg.label}</span>
                       </td>
                       <td style={{ padding: "14px 20px", color: "var(--muted)", fontSize: 13, whiteSpace: "nowrap" }}>
-                        {t.createdAt.toLocaleDateString("lo-LA")}
+                        {t.createdAt.toLocaleDateString("en-GB")}
+                      </td>
+                      <td style={{ padding: "14px 20px", color: "var(--muted)", fontSize: 13, whiteSpace: "nowrap" }}>
+                        {t.expiresAt ? t.expiresAt.toLocaleDateString("en-GB") : "—"}
                       </td>
                       <td style={{ padding: "14px 20px" }}>
                         <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
@@ -221,6 +242,17 @@ export default function Customers() {
                             }}
                           >
                             ແກ້ໄຂ
+                          </button>
+                          <button
+                            onClick={() => setSetPlanTenant(t)}
+                            style={{
+                              padding: "5px 12px", borderRadius: 6, fontSize: 12, fontWeight: 500,
+                              border: "1px solid rgba(139,92,246,.3)",
+                              background: "var(--purple-bg, rgba(139,92,246,.08))", color: "var(--purple, #7c3aed)",
+                              cursor: "pointer",
+                            }}
+                          >
+                            ຕັ້ງຄ່າ
                           </button>
                           <button
                             onClick={() => toggleSuspend(t)}
@@ -273,6 +305,152 @@ export default function Customers() {
           }}
         />
       )}
+
+      {/* Set Plan Modal */}
+      {setPlanTenant && (
+        <SetPlanModal
+          tenant={setPlanTenant}
+          onClose={() => setSetPlanTenant(null)}
+          onUpdated={() => { setSetPlanTenant(null); loadTenants(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Set Plan Modal ───────────────────────────────────────────────────
+
+function defaultDateStr(plan: "monthly" | "yearly"): string {
+  const d = new Date();
+  if (plan === "monthly") d.setDate(d.getDate() + 30);
+  else d.setDate(d.getDate() + 365);
+  return d.toISOString().slice(0, 10);
+}
+
+function SetPlanModal({ tenant, onClose, onUpdated }: {
+  tenant: Tenant;
+  onClose: () => void;
+  onUpdated: () => void;
+}) {
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const [plan, setPlan] = useState<"monthly" | "yearly">("monthly");
+  const [dateStr, setDateStr] = useState(() => defaultDateStr("monthly"));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const cfg = STATUS_CFG[tenant.status] ?? STATUS_CFG.cancelled;
+
+  function handlePlanChange(newPlan: "monthly" | "yearly") {
+    setPlan(newPlan);
+    setDateStr(defaultDateStr(newPlan));
+  }
+
+  function handleOverlayClick(e: React.MouseEvent) {
+    if (e.target === overlayRef.current) onClose();
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(""); setBusy(true);
+    try {
+      await updateDoc(doc(db, "tenants", tenant.id), {
+        plan,
+        status: "active",
+        expiresAt: Timestamp.fromDate(new Date(dateStr + "T23:59:59")),
+        updatedAt: serverTimestamp(),
+      });
+      onUpdated();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "ເກີດຂໍ້ຜິດພາດ");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      ref={overlayRef}
+      onClick={handleOverlayClick}
+      style={{
+        position: "fixed", inset: 0,
+        background: "rgba(10,22,40,.6)",
+        backdropFilter: "blur(3px)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 200, padding: 20,
+      }}
+    >
+      <div style={{
+        background: "var(--surf)", borderRadius: 14,
+        width: "100%", maxWidth: 420,
+        boxShadow: "0 20px 60px rgba(0,0,0,.2)",
+        overflow: "hidden",
+      }}>
+        {/* Header */}
+        <div style={{
+          padding: "20px 24px", borderBottom: "1px solid var(--border)",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+        }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text)" }}>ຕັ້ງຄ່າແພັກເກດ</div>
+            <div style={{ fontSize: 13, color: "var(--text-2)", marginTop: 4, display: "flex", alignItems: "center", gap: 8 }}>
+              {tenant.shopName}
+              <span style={{
+                fontSize: 11, fontWeight: 600,
+                color: cfg.color, background: cfg.bg,
+                border: `1px solid ${cfg.color}30`, borderRadius: 20, padding: "1px 8px",
+              }}>{cfg.label}</span>
+              {tenant.plan !== "trial" && (
+                <span style={{ fontSize: 12, color: "var(--muted)" }}>· {planLabel(tenant.plan, tenant.duration)}</span>
+              )}
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--muted)", padding: 4, borderRadius: 6, cursor: "pointer" }}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
+        {/* Form */}
+        <form onSubmit={handleSubmit} style={{ padding: "24px" }}>
+          <Field label="ແພັກເກດ">
+            <select
+              value={plan}
+              onChange={e => handlePlanChange(e.target.value as "monthly" | "yearly")}
+              style={inputStyle}
+            >
+              <option value="monthly">ລາຍເດືອນ</option>
+              <option value="yearly">ລາຍປີ</option>
+            </select>
+          </Field>
+          <Field label="ວັນໝົດອາຍຸ">
+            <input
+              type="date"
+              value={dateStr}
+              onChange={e => setDateStr(e.target.value)}
+              required
+              style={inputStyle}
+            />
+          </Field>
+
+          {error && (
+            <div style={{ padding: "10px 14px", marginBottom: 16, background: "var(--red-bg)", border: "1px solid rgba(239,68,68,.25)", borderRadius: 8, fontSize: 13, color: "var(--red)" }}>
+              {error}
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+            <button type="button" onClick={onClose}
+              style={{ flex: 1, padding: "10px", border: "1.5px solid var(--border)", borderRadius: 8, background: "none", fontSize: 14, fontWeight: 500, color: "var(--text-2)", cursor: "pointer" }}>
+              ຍົກເລີກ
+            </button>
+            <button type="submit" disabled={busy}
+              style={{ flex: 1, padding: "10px", border: "none", borderRadius: 8, background: busy ? "var(--muted)" : "var(--accent)", fontSize: 14, fontWeight: 600, color: "#fff", cursor: busy ? "not-allowed" : "pointer", transition: "background .15s" }}>
+              {busy ? "ກຳລັງບັນທຶກ..." : "ຕັ້ງຄ່າ"}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }

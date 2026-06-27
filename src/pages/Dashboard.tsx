@@ -156,7 +156,7 @@ export default function Dashboard() {
                   <td style={{ padding: "14px 20px", color: "var(--text-2)", fontSize: 13, textTransform: "capitalize" }}>{t.plan}</td>
                   <td style={{ padding: "14px 20px" }}><StatusBadge status={t.status as keyof typeof STATUS_CONFIG} /></td>
                   <td style={{ padding: "14px 20px", color: "var(--muted)", fontSize: 13 }}>
-                    {t.createdAt.toLocaleDateString("lo-LA")}
+                    {t.createdAt.toLocaleDateString("en-GB")}
                   </td>
                 </tr>
               ))}
