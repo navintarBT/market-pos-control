@@ -16,6 +16,7 @@ interface Customer {
   firstName: string;
   lastName: string;
   phone: string;
+  email: string;
 }
 
 interface ShopTenant {
@@ -109,7 +110,7 @@ export default function CustomerShops() {
       ]);
       if (custSnap.exists()) {
         const d = custSnap.data();
-        setCustomer({ id: customerId, firstName: d.firstName ?? "", lastName: d.lastName ?? "", phone: d.phone ?? "" });
+        setCustomer({ id: customerId, firstName: d.firstName ?? "", lastName: d.lastName ?? "", phone: d.phone ?? "", email: d.email ?? "" });
       }
       setShops(shopsSnap.docs.map(d => {
         const raw = d.data();
@@ -485,6 +486,7 @@ export default function CustomerShops() {
         <CreateShopModal
           customerId={customerId}
           packages={packages}
+          ownerEmail={customer?.email ?? ""}
           onClose={() => setShowCreate(false)}
           onCreated={() => { setShowCreate(false); load(); }}
         />
@@ -566,14 +568,15 @@ function PackagePreview({ pkg }: { pkg: Package }) {
 
 // ─── Create Shop Modal ─────────────────────────────────────────────────
 
-function CreateShopModal({ customerId, packages, onClose, onCreated }: {
+function CreateShopModal({ customerId, packages, ownerEmail, onClose, onCreated }: {
   customerId: string;
   packages: Package[];
+  ownerEmail: string;
   onClose: () => void;
   onCreated: () => void;
 }) {
   const overlayRef = useRef<HTMLDivElement>(null);
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(ownerEmail);
   const [shopName, setShopName] = useState("");
   const [village, setVillage] = useState("");
   const [district, setDistrict] = useState("");
@@ -596,6 +599,10 @@ function CreateShopModal({ customerId, packages, onClose, onCreated }: {
     if (!selectedPkg) { setError("ກະລຸນາເລືອກແພັກເກດ"); return; }
     setError(""); setBusy(true);
     try {
+      // shopId is independent from uid — supports multiple shops per owner
+      const shopRef = doc(collection(db, "shops"));
+      const shopId = shopRef.id;
+
       const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
       const rand = new Uint8Array(16);
       crypto.getRandomValues(rand);
@@ -610,25 +617,48 @@ function CreateShopModal({ customerId, packages, onClose, onCreated }: {
         }
       );
       const signUpData = await signUpRes.json();
+
+      let uid: string;
+      let isNewUser = true;
+
       if (!signUpRes.ok) {
         const code: string = signUpData.error?.message ?? "CREATE_USER_FAILED";
-        if (code === "EMAIL_EXISTS") throw new Error("ອີເມວນີ້ມີໃນລະບົບແລ້ວ");
-        throw new Error(code);
+        if (code !== "EMAIL_EXISTS") throw new Error(code);
+        // Email already has an account — find their UID and add the new shop to their list
+        const existingSnap = await getDocs(query(collection(db, "users"), where("email", "==", email.trim())));
+        if (existingSnap.empty) throw new Error("ອີເມວນີ້ມີໃນ Auth ແຕ່ຫາ User document ບໍ່ພົບ");
+        uid = existingSnap.docs[0].id;
+        isNewUser = false;
+      } else {
+        uid = signUpData.localId;
       }
-      const uid: string = signUpData.localId;
-      const shopId = uid;
+
       const plan = unitToPlan(selectedPkg.unit);
       const expiresAt = Timestamp.fromDate(calcExpiry(selectedPkg.duration, selectedPkg.unit));
       const now = serverTimestamp();
       const features = { returnEnabled, returnSummaryEnabled, monthlySummaryEnabled };
 
       const batch = writeBatch(db);
-      batch.set(doc(db, "users", uid), { role: "customer", shopId, email: email.trim(), createdAt: now });
-      batch.set(doc(db, "shops", shopId), {
+
+      if (isNewUser) {
+        batch.set(doc(db, "users", uid), {
+          role: "customer", shopId, shopIds: [shopId],
+          email: email.trim(), createdAt: now,
+        });
+      } else {
+        // Query tenants to get shops this uid actually owns (source of truth)
+        const ownedSnap = await getDocs(query(collection(db, "tenants"), where("ownerUid", "==", uid)));
+        const actualShopIds = ownedSnap.docs.map(d => d.id);
+        batch.update(doc(db, "users", uid), {
+          shopId: actualShopIds[0] ?? shopId,
+          shopIds: [...actualShopIds, shopId],
+        });
+      }
+
+      batch.set(shopRef, {
         name: shopName.trim(), customerId,
         village: village.trim(), district: district.trim(), province: province.trim(),
-        features,
-        createdAt: now,
+        features, createdAt: now,
       });
       batch.set(doc(db, `shops/${shopId}/users`, uid), { role: "customer", email: email.trim(), createdAt: now });
       batch.set(doc(db, "tenants", shopId), {
@@ -638,8 +668,9 @@ function CreateShopModal({ customerId, packages, onClose, onCreated }: {
         status: plan === "trial" ? "trial" : "active",
         expiresAt, createdAt: now,
       });
+
       await batch.commit();
-      await sendPasswordResetEmail(auth, email.trim());
+      if (isNewUser) await sendPasswordResetEmail(auth, email.trim());
       onCreated();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "ເກີດຂໍ້ຜິດພາດ");
@@ -691,9 +722,15 @@ function CreateShopModal({ customerId, packages, onClose, onCreated }: {
               {selectedPkg && <PackagePreview pkg={selectedPkg} />}
             </Field>
           )}
-          <Field label="ອີເມວ" required>
-            <input type="email" value={email} onChange={e => setEmail(e.target.value)} required style={inputStyle} placeholder="shop@example.com" />
-          </Field>
+          {ownerEmail ? (
+            <div style={{ marginBottom: 16, padding: "10px 14px", background: "var(--surf2)", borderRadius: 8, fontSize: 13, color: "var(--text-2)", border: "1.5px solid var(--border)" }}>
+              📧 Gmail: <strong style={{ color: "var(--text)" }}>{ownerEmail}</strong>
+            </div>
+          ) : (
+            <Field label="ອີເມວ" required>
+              <input type="email" value={email} onChange={e => setEmail(e.target.value)} required style={inputStyle} placeholder="shop@example.com" />
+            </Field>
+          )}
           <Field label="ຊື່ຮ້ານ" required>
             <input type="text" value={shopName} onChange={e => setShopName(e.target.value)} required style={inputStyle} placeholder="ຊື່ຮ້ານຄ້າ" />
           </Field>
@@ -946,14 +983,39 @@ function EditShopModal({ shop, onClose, onSaved }: {
         const newUid: string = json.localId;
         const now = serverTimestamp();
 
+        // Get all shops currently owned by old uid
+        const allOwnedSnap = await getDocs(query(collection(db, "tenants"), where("ownerUid", "==", shop.ownerUid)));
+        const remainingIds = allOwnedSnap.docs.map(d => d.id).filter(id => id !== shopId);
+
         const batch = writeBatch(db);
-        batch.set(doc(db, "users", newUid), { role: "customer", shopId, email: newEmail, createdAt: now });
-        batch.set(doc(db, "shops", shopId, "users", newUid), { role: "customer", email: newEmail, createdAt: now });
-        batch.delete(doc(db, "users", shop.ownerUid));
-        batch.delete(doc(db, "shops", shopId, "users", shop.ownerUid));
         const features = { returnEnabled, returnSummaryEnabled, monthlySummaryEnabled };
+
+        // New user gets only THIS shop
+        batch.set(doc(db, "users", newUid), {
+          role: "customer",
+          shopId,
+          shopIds: [shopId],
+          email: newEmail,
+          createdAt: now,
+        });
+        batch.set(doc(db, "shops", shopId, "users", newUid), { role: "customer", email: newEmail, createdAt: now });
+        batch.delete(doc(db, "shops", shopId, "users", shop.ownerUid));
+
+        // Update only THIS shop's tenant
         batch.update(doc(db, "tenants", shopId), { shopName: shopName.trim(), ownerEmail: newEmail, ownerUid: newUid, status, updatedAt: now });
         batch.update(doc(db, "shops", shopId), { name: shopName.trim(), village: village.trim(), district: district.trim(), province: province.trim(), features, updatedAt: now });
+
+        if (remainingIds.length === 0) {
+          // Old user has no more shops → remove their doc
+          batch.delete(doc(db, "users", shop.ownerUid));
+        } else {
+          // Old user keeps remaining shops → update their shopIds
+          batch.update(doc(db, "users", shop.ownerUid), {
+            shopId: remainingIds[0],
+            shopIds: remainingIds,
+          });
+        }
+
         await batch.commit();
         await sendPasswordResetEmail(auth, newEmail);
         onSaved({ ...shop, shopName: shopName.trim(), ownerEmail: newEmail, ownerUid: newUid, status });

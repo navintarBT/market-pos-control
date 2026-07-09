@@ -12,6 +12,7 @@ interface Customer {
   firstName: string;
   lastName: string;
   phone: string;
+  email: string;
   village: string;
   district: string;
   province: string;
@@ -44,6 +45,7 @@ export default function Customers() {
         firstName: d.data().firstName ?? "",
         lastName: d.data().lastName ?? "",
         phone: d.data().phone ?? "",
+        email: d.data().email ?? "",
         village: d.data().village ?? "",
         district: d.data().district ?? "",
         province: d.data().province ?? "",
@@ -64,6 +66,7 @@ export default function Customers() {
     return !search
       || `${c.firstName} ${c.lastName}`.toLowerCase().includes(q)
       || c.phone.includes(q)
+      || c.email.toLowerCase().includes(q)
       || c.idNumber.toLowerCase().includes(q)
       || c.village.toLowerCase().includes(q);
   });
@@ -129,7 +132,7 @@ export default function Customers() {
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--border)", background: "var(--surf2)" }}>
-                  {["ຊື່-ນາມສະກຸນ", "ເບີໂທ", "ບ້ານ / ເມືອງ / ແຂວງ", "ວັນເດືອນປີເກີດ", "ປ.ຈ. / ໝາຍເລກ", ""].map(h => (
+                  {["ຊື່-ນາມສະກຸນ", "ເບີໂທ / Gmail", "ບ້ານ / ເມືອງ / ແຂວງ", "ວັນເດືອນປີເກີດ", "ປ.ຈ. / ໝາຍເລກ", ""].map(h => (
                     <th key={h} style={{
                       padding: "11px 20px", textAlign: "left",
                       fontSize: 12, fontWeight: 600, letterSpacing: ".05em",
@@ -148,7 +151,10 @@ export default function Customers() {
                     <td style={{ padding: "14px 20px", fontWeight: 600, color: "var(--text)" }}>
                       {c.firstName} {c.lastName}
                     </td>
-                    <td style={{ padding: "14px 20px", color: "var(--text-2)", fontSize: 13 }}>{c.phone || "—"}</td>
+                    <td style={{ padding: "14px 20px", color: "var(--text-2)", fontSize: 13 }}>
+                      <div>{c.phone || "—"}</div>
+                      {c.email && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{c.email}</div>}
+                    </td>
                     <td style={{ padding: "14px 20px", color: "var(--text-2)", fontSize: 13 }}>
                       {[c.village, c.district, c.province].filter(Boolean).join(" / ") || "—"}
                     </td>
@@ -223,6 +229,7 @@ function AddCustomerModal({ onClose, onCreated }: { onClose: () => void; onCreat
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
   const [village, setVillage] = useState("");
   const [district, setDistrict] = useState("");
   const [province, setProvince] = useState("");
@@ -244,6 +251,7 @@ function AddCustomerModal({ onClose, onCreated }: { onClose: () => void; onCreat
         firstName: firstName.trim(),
         lastName: lastName.trim(),
         phone: phone.trim(),
+        email: email.trim(),
         village: village.trim(),
         district: district.trim(),
         province: province.trim(),
@@ -298,6 +306,9 @@ function AddCustomerModal({ onClose, onCreated }: { onClose: () => void; onCreat
           <Field label="ເບີໂທ" required>
             <input type="tel" value={phone} onChange={e => setPhone(e.target.value)} required style={inputStyle} placeholder="020xxxxxxxx" />
           </Field>
+          <Field label="Gmail / ອີເມວ">
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} style={inputStyle} placeholder="example@gmail.com" />
+          </Field>
           <LaoAddressSelect
             province={province} district={district} village={village}
             onProvinceChange={setProvince} onDistrictChange={setDistrict} onVillageChange={setVillage}
@@ -347,6 +358,7 @@ function EditCustomerModal({ customer, onClose, onSaved }: {
   const [firstName, setFirstName] = useState(customer.firstName);
   const [lastName, setLastName] = useState(customer.lastName);
   const [phone, setPhone] = useState(customer.phone);
+  const [email, setEmail] = useState(customer.email);
   const [village, setVillage] = useState(customer.village);
   const [district, setDistrict] = useState(customer.district);
   const [province, setProvince] = useState(customer.province);
@@ -366,16 +378,16 @@ function EditCustomerModal({ customer, onClose, onSaved }: {
     try {
       await updateDoc(doc(db, "customers", customer.id), {
         firstName: firstName.trim(), lastName: lastName.trim(),
-        phone: phone.trim(), village: village.trim(),
-        district: district.trim(), province: province.trim(),
+        phone: phone.trim(), email: email.trim(),
+        village: village.trim(), district: district.trim(), province: province.trim(),
         dateOfBirth, idType, idNumber: idNumber.trim(),
         updatedAt: serverTimestamp(),
       });
       onSaved({
         ...customer,
         firstName: firstName.trim(), lastName: lastName.trim(),
-        phone: phone.trim(), village: village.trim(),
-        district: district.trim(), province: province.trim(),
+        phone: phone.trim(), email: email.trim(),
+        village: village.trim(), district: district.trim(), province: province.trim(),
         dateOfBirth, idType, idNumber: idNumber.trim(),
       });
     } catch (err: unknown) {
@@ -422,6 +434,9 @@ function EditCustomerModal({ customer, onClose, onSaved }: {
           </div>
           <Field label="ເບີໂທ" required>
             <input type="tel" value={phone} onChange={e => setPhone(e.target.value)} required style={inputStyle} />
+          </Field>
+          <Field label="Gmail / ອີເມວ">
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} style={inputStyle} placeholder="example@gmail.com" />
           </Field>
           <LaoAddressSelect
             province={province} district={district} village={village}
