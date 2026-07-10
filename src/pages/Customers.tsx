@@ -1,11 +1,13 @@
 import { useEffect, useState, useRef } from "react";
 import {
-  collection, getDocs, query, orderBy,
-  doc, updateDoc, addDoc, serverTimestamp,
+  collection, getDocs, query, orderBy, where,
+  doc, updateDoc, addDoc, serverTimestamp, writeBatch,
 } from "firebase/firestore";
+import { sendPasswordResetEmail } from "firebase/auth";
 import { useNavigate } from "react-router-dom";
-import { db } from "../firebase";
+import { db, auth } from "../firebase";
 import LaoAddressSelect from "../components/LaoAddressSelect";
+import ConfirmDestructiveModal from "../components/ConfirmDestructiveModal";
 
 interface Customer {
   id: string;
@@ -35,6 +37,31 @@ export default function Customers() {
   const [search, setSearch] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [editCustomer, setEditCustomer] = useState<Customer | null>(null);
+  const [changeEmailCustomer, setChangeEmailCustomer] = useState<Customer | null>(null);
+  const [deleteCustomer, setDeleteCustomer] = useState<Customer | null>(null);
+  const [deleteCustomerShopCount, setDeleteCustomerShopCount] = useState(0);
+
+  async function openDeleteCustomer(c: Customer) {
+    const snap = await getDocs(query(collection(db, "tenants"), where("customerId", "==", c.id)));
+    setDeleteCustomerShopCount(snap.size);
+    setDeleteCustomer(c);
+  }
+
+  async function doDeleteCustomer(c: Customer) {
+    const snap = await getDocs(query(collection(db, "tenants"), where("customerId", "==", c.id)));
+    const ownerUid = snap.docs[0]?.data().ownerUid as string | undefined;
+    const batch = writeBatch(db);
+    for (const td of snap.docs) {
+      const sid = td.id;
+      batch.delete(doc(db, "shops", sid, "users", ownerUid ?? ""));
+      batch.delete(doc(db, "tenants", sid));
+      batch.delete(doc(db, "shops", sid));
+    }
+    if (ownerUid) batch.delete(doc(db, "users", ownerUid));
+    batch.delete(doc(db, "customers", c.id));
+    await batch.commit();
+    setCustomers(prev => prev.filter(x => x.id !== c.id));
+  }
 
   async function load() {
     setLoading(true);
@@ -76,7 +103,16 @@ export default function Customers() {
       {/* Header */}
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 28 }}>
         <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>ລູກຄ້າ</h1>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+            <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--text)" }}>ລູກຄ້າ</h1>
+            {!loading && (
+              <span style={{
+                fontSize: 13, fontWeight: 700, borderRadius: 20, padding: "2px 11px",
+                color: "var(--accent)", background: "var(--accent-bg, rgba(99,102,241,.1))",
+                border: "1px solid rgba(99,102,241,.25)",
+              }}>{customers.length}</span>
+            )}
+          </div>
           <p style={{ fontSize: 14, color: "var(--text-2)" }}>ຂໍ້ມູນສ່ວນຕົວລູກຄ້າ — ກົດ "ຮ້ານ →" ເພື່ອຈັດການຮ້ານ</p>
         </div>
         <button
@@ -178,6 +214,22 @@ export default function Customers() {
                           }}
                         >ແກ້ໄຂ</button>
                         <button
+                          onClick={() => openDeleteCustomer(c)}
+                          style={{
+                            padding: "5px 12px", borderRadius: 6, fontSize: 12, fontWeight: 500,
+                            border: "1px solid rgba(239,68,68,.3)",
+                            background: "var(--red-bg)", color: "var(--red)", cursor: "pointer",
+                          }}
+                        >ລຶບ</button>
+                        <button
+                          onClick={() => setChangeEmailCustomer(c)}
+                          style={{
+                            padding: "5px 12px", borderRadius: 6, fontSize: 12, fontWeight: 500,
+                            border: "1px solid rgba(139,92,246,.3)",
+                            background: "rgba(139,92,246,.08)", color: "#7c3aed", cursor: "pointer",
+                          }}
+                        >ປ່ຽນ Email</button>
+                        <button
                           onClick={() => navigate(`/customers/${c.id}`)}
                           style={{
                             padding: "5px 12px", borderRadius: 6, fontSize: 12, fontWeight: 600,
@@ -216,6 +268,31 @@ export default function Customers() {
             setCustomers(prev => prev.map(c => c.id === updated.id ? updated : c));
             setEditCustomer(null);
           }}
+        />
+      )}
+
+      {changeEmailCustomer && (
+        <ChangeLoginEmailModal
+          customer={changeEmailCustomer}
+          onClose={() => setChangeEmailCustomer(null)}
+          onChanged={(newEmail) => {
+            setCustomers(prev => prev.map(c => c.id === changeEmailCustomer.id ? { ...c, email: newEmail } : c));
+            setChangeEmailCustomer(null);
+          }}
+        />
+      )}
+
+      {deleteCustomer && (
+        <ConfirmDestructiveModal
+          title={`ລຶບລູກຄ້າ: ${deleteCustomer.firstName} ${deleteCustomer.lastName}`}
+          warning={
+            <>
+              ການລຶບລູກຄ້ານີ້ຈະລຶບ <strong>ທຸກ {deleteCustomerShopCount} ຮ້ານ</strong> ທີ່ເຊື່ອມກັນ ລວມທັງ account login — ຂໍ້ມູນຈະຫາຍຖາວອນ.
+            </>
+          }
+          confirmLabel="ລຶບລູກຄ້າ + ທຸກຮ້ານ"
+          onConfirm={() => doDeleteCustomer(deleteCustomer)}
+          onClose={() => setDeleteCustomer(null)}
         />
       )}
     </div>
@@ -471,6 +548,180 @@ function EditCustomerModal({ customer, onClose, onSaved }: {
             </button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+// ─── Change Login Email Modal ──────────────────────────────────────────
+
+function ChangeLoginEmailModal({ customer, onClose, onChanged }: {
+  customer: Customer;
+  onClose: () => void;
+  onChanged: (newEmail: string) => void;
+}) {
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const [loading, setLoading] = useState(true);
+  const [currentLoginEmail, setCurrentLoginEmail] = useState("");
+  const [ownerUid, setOwnerUid] = useState("");
+  const [allShopIds, setAllShopIds] = useState<string[]>([]);
+  const [newEmail, setNewEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    getDocs(query(collection(db, "tenants"), where("customerId", "==", customer.id)))
+      .then(snap => {
+        if (snap.empty) {
+          setError("ບໍ່ພົບຮ້ານທີ່ເຊື່ອມກັບລູກຄ້ານີ້");
+          setLoading(false);
+          return;
+        }
+        const first = snap.docs[0].data();
+        setCurrentLoginEmail(first.ownerEmail ?? "");
+        setOwnerUid(first.ownerUid ?? "");
+        setAllShopIds(snap.docs.map(d => d.id));
+        setLoading(false);
+      })
+      .catch(() => {
+        setError("ດຶງຂໍ້ມູນບໍ່ສຳເລັດ");
+        setLoading(false);
+      });
+  }, [customer.id]);
+
+  function handleOverlayClick(e: React.MouseEvent) {
+    if (e.target === overlayRef.current) onClose();
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(""); setBusy(true);
+    try {
+      const trimmed = newEmail.trim().toLowerCase();
+      if (trimmed === currentLoginEmail.toLowerCase()) throw new Error("Email ໃໝ່ຕ້ອງຕ່າງຈາກ email ເດີມ");
+
+      const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+      const rand = new Uint8Array(16);
+      crypto.getRandomValues(rand);
+      const tempPassword = Array.from(rand, b => chars[b % 62]).join("") + "Aa1!";
+
+      const res = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${import.meta.env.VITE_FIREBASE_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: trimmed, password: tempPassword, returnSecureToken: false }),
+        }
+      );
+      const json = await res.json();
+      if (!res.ok) {
+        const code: string = json.error?.message ?? "FAILED";
+        if (code === "EMAIL_EXISTS") throw new Error("ອີເມວນີ້ຖືກໃຊ້ແລ້ວ");
+        throw new Error(code);
+      }
+      const newUid: string = json.localId;
+      const now = serverTimestamp();
+
+      const batch = writeBatch(db);
+
+      batch.set(doc(db, "users", newUid), {
+        role: "customer",
+        shopId: allShopIds[0],
+        shopIds: allShopIds,
+        email: trimmed,
+        createdAt: now,
+      });
+
+      for (const sid of allShopIds) {
+        batch.set(doc(db, "shops", sid, "users", newUid), { role: "customer", email: trimmed, createdAt: now });
+        batch.delete(doc(db, "shops", sid, "users", ownerUid));
+        batch.update(doc(db, "tenants", sid), { ownerEmail: trimmed, ownerUid: newUid, updatedAt: now });
+      }
+
+      batch.delete(doc(db, "users", ownerUid));
+      batch.update(doc(db, "customers", customer.id), { email: trimmed, updatedAt: now });
+
+      await batch.commit();
+      await sendPasswordResetEmail(auth, trimmed);
+      onChanged(trimmed);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "ເກີດຂໍ້ຜິດພາດ");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div ref={overlayRef} onClick={handleOverlayClick} style={{
+      position: "fixed", inset: 0, background: "rgba(10,22,40,.6)",
+      backdropFilter: "blur(3px)", display: "flex", alignItems: "center",
+      justifyContent: "center", zIndex: 200, padding: 20,
+    }}>
+      <div style={{
+        background: "var(--surf)", borderRadius: 14, width: "100%", maxWidth: 400,
+        boxShadow: "0 20px 60px rgba(0,0,0,.2)", overflow: "hidden",
+      }}>
+        <div style={{
+          padding: "20px 24px", borderBottom: "1px solid var(--border)",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+        }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text)" }}>ປ່ຽນ Email Login</div>
+            <div style={{ fontSize: 13, color: "var(--text-2)", marginTop: 2 }}>{customer.firstName} {customer.lastName}</div>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--muted)", padding: 4, borderRadius: 6, cursor: "pointer" }}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
+        <div style={{ padding: "24px" }}>
+          {loading ? (
+            <div style={{ textAlign: "center", padding: "20px 0", color: "var(--muted)", fontSize: 14 }}>ກຳລັງດຶງຂໍ້ມູນ...</div>
+          ) : (
+            <>
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-2)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>Email ປັດຈຸບັນ</div>
+                <div style={{ padding: "9px 13px", borderRadius: 8, background: "var(--surf2)", border: "1.5px solid var(--border)", fontSize: 14, color: "var(--muted)", userSelect: "all" }}>
+                  {currentLoginEmail || "—"}
+                </div>
+                <div style={{ marginTop: 5, fontSize: 11, color: "var(--muted)" }}>
+                  ໃຊ້ login ໃນທຸກ {allShopIds.length} ຮ້ານ
+                </div>
+              </div>
+
+              {error && !busy ? (
+                <div style={{ padding: "10px 14px", marginBottom: 16, background: "var(--red-bg)", border: "1px solid rgba(239,68,68,.25)", borderRadius: 8, fontSize: 13, color: "var(--red)" }}>
+                  {error}
+                </div>
+              ) : null}
+
+              <form onSubmit={handleSubmit}>
+                <Field label="Email ໃໝ່" required>
+                  <input
+                    type="email" value={newEmail} onChange={e => setNewEmail(e.target.value)}
+                    required placeholder="example@gmail.com" style={inputStyle}
+                    autoFocus
+                  />
+                </Field>
+
+                <div style={{ padding: "10px 14px", marginBottom: 16, background: "rgba(245,158,11,.08)", border: "1px solid rgba(245,158,11,.3)", borderRadius: 8, fontSize: 12, color: "#92400e", lineHeight: 1.6 }}>
+                  ⚠️ ລະບົບຈະສ້າງ account ໃໝ່ ແລ້ວຍ້າຍທຸກ {allShopIds.length} ຮ້ານໄປ — ຜູ້ໃຊ້ຈະໄດ້ຮັບ email reset ລະຫັດ
+                </div>
+
+                <div style={{ display: "flex", gap: 10 }}>
+                  <button type="button" onClick={onClose} style={{ flex: 1, padding: "10px", border: "1.5px solid var(--border)", borderRadius: 8, background: "none", fontSize: 14, fontWeight: 500, color: "var(--text-2)", cursor: "pointer" }}>
+                    ຍົກເລີກ
+                  </button>
+                  <button type="submit" disabled={busy || !!error} style={{ flex: 1, padding: "10px", border: "none", borderRadius: 8, background: busy || error ? "var(--muted)" : "#7c3aed", fontSize: 14, fontWeight: 600, color: "#fff", cursor: busy || error ? "not-allowed" : "pointer" }}>
+                    {busy ? "ກຳລັງປ່ຽນ..." : "ຢືນຢັນປ່ຽນ"}
+                  </button>
+                </div>
+              </form>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

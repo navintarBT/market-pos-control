@@ -1,15 +1,16 @@
 import { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import LaoAddressSelect from "../components/LaoAddressSelect";
+import ConfirmDestructiveModal from "../components/ConfirmDestructiveModal";
 import {
-  collection, getDocs, query, where, orderBy,
+  collection, getDocs, query, where, orderBy, limit,
   doc, getDoc, addDoc, updateDoc, deleteDoc, writeBatch,
   serverTimestamp, Timestamp,
 } from "firebase/firestore";
 import { sendPasswordResetEmail } from "firebase/auth";
 import { db, auth } from "../firebase";
 import type { Package } from "./PackageSettings";
-import { UNIT_LABELS } from "./PackageSettings";
+import { UNIT_LABELS, fmtPrice } from "./PackageSettings";
 
 interface Customer {
   id: string;
@@ -24,12 +25,13 @@ interface ShopTenant {
   shopName: string;
   ownerEmail: string;
   ownerUid: string;
-  plan: "trial" | "monthly" | "yearly";
+  plan: "trial" | "monthly" | "yearly" | "unlimited";
   duration: number;
   status: "active" | "trial" | "suspended" | "cancelled";
   expiresAt?: Date;
   createdAt: Date;
   customerId: string;
+  lastActive?: Date | null;
 }
 
 interface Payment {
@@ -55,18 +57,21 @@ const STATUS_CFG = {
 };
 
 function planLabel(plan: string, duration: number): string {
+  if (plan === "unlimited") return "♾ ບໍ່ຈຳກັດ";
   if (plan === "monthly") return `ລາຍເດືອນ · ${duration} ເດືອນ`;
   if (plan === "yearly") return `ລາຍປີ · ${duration} ປີ`;
   return "ທົດລອງໃຊ້";
 }
 
-function unitToPlan(unit: "day" | "month" | "year"): "trial" | "monthly" | "yearly" {
+function unitToPlan(unit: Package["unit"]): ShopTenant["plan"] {
+  if (unit === "unlimited") return "unlimited";
   if (unit === "year") return "yearly";
   if (unit === "month") return "monthly";
   return "trial";
 }
 
-function calcExpiry(duration: number, unit: "day" | "month" | "year"): Date {
+function calcExpiry(duration: number, unit: Package["unit"]): Date | null {
+  if (unit === "unlimited") return null;
   const d = new Date();
   if (unit === "month") d.setMonth(d.getMonth() + duration);
   else if (unit === "year") d.setFullYear(d.getFullYear() + duration);
@@ -99,6 +104,7 @@ export default function CustomerShops() {
   const [editPayment, setEditPayment] = useState<Payment | null>(null);
   const [deletePaymentId, setDeletePaymentId] = useState<string | null>(null);
   const [suspendShop, setSuspendShop] = useState<ShopTenant | null>(null);
+  const [deleteShop, setDeleteShop] = useState<ShopTenant | null>(null);
 
   async function load() {
     if (!customerId) return;
@@ -112,7 +118,7 @@ export default function CustomerShops() {
         const d = custSnap.data();
         setCustomer({ id: customerId, firstName: d.firstName ?? "", lastName: d.lastName ?? "", phone: d.phone ?? "", email: d.email ?? "" });
       }
-      setShops(shopsSnap.docs.map(d => {
+      const shopList: ShopTenant[] = shopsSnap.docs.map(d => {
         const raw = d.data();
         return {
           id: d.id,
@@ -125,8 +131,28 @@ export default function CustomerShops() {
           expiresAt: raw.expiresAt?.toDate?.() ?? undefined,
           createdAt: raw.createdAt?.toDate?.() ?? new Date(),
           customerId,
+          lastActive: undefined,
         };
-      }));
+      });
+      setShops(shopList);
+
+      // Load last sale date for each shop in parallel
+      const lastActivePairs = await Promise.all(
+        shopList.map(async s => {
+          try {
+            const snap = await getDocs(query(
+              collection(db, "shops", s.id, "sales"),
+              orderBy("createdAt", "desc"),
+              limit(1)
+            ));
+            return [s.id, snap.docs[0]?.data().createdAt?.toDate?.() ?? null] as const;
+          } catch {
+            return [s.id, null] as const;
+          }
+        })
+      );
+      const lastActiveMap = Object.fromEntries(lastActivePairs);
+      setShops(prev => prev.map(s => ({ ...s, lastActive: lastActiveMap[s.id] ?? null })));
     } catch {} finally {
       setLoading(false);
     }
@@ -141,6 +167,7 @@ export default function CustomerShops() {
             id: d.id,
             name: d.data().name ?? "",
             price: d.data().price ?? 0,
+            currency: d.data().currency ?? "LAK",
             duration: d.data().duration ?? 1,
             unit: d.data().unit ?? "month",
             active: true,
@@ -186,6 +213,23 @@ export default function CustomerShops() {
     .filter(p => p.paidAt.getFullYear() === now.getFullYear() && p.paidAt.getMonth() === now.getMonth())
     .reduce((s, p) => s + p.amount, 0);
 
+  async function doDeleteShop(s: ShopTenant) {
+    const userSnap = await getDoc(doc(db, "users", s.ownerUid));
+    const shopIds: string[] = userSnap.data()?.shopIds ?? [s.id];
+    const remaining = shopIds.filter(id => id !== s.id);
+    const batch = writeBatch(db);
+    batch.delete(doc(db, "shops", s.id, "users", s.ownerUid));
+    batch.delete(doc(db, "tenants", s.id));
+    batch.delete(doc(db, "shops", s.id));
+    if (remaining.length === 0) {
+      batch.delete(doc(db, "users", s.ownerUid));
+    } else {
+      batch.update(doc(db, "users", s.ownerUid), { shopId: remaining[0], shopIds: remaining });
+    }
+    await batch.commit();
+    setShops(prev => prev.filter(x => x.id !== s.id));
+  }
+
   async function doToggleSuspend(s: ShopTenant) {
     setActionId(s.id);
     setSuspendShop(null);
@@ -222,9 +266,18 @@ export default function CustomerShops() {
             ກັບຄືນ
           </button>
           <div>
-            <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--text)", marginBottom: 2 }}>
-              {customer ? `${customer.firstName} ${customer.lastName}` : "..."}
-            </h1>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 2 }}>
+              <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--text)" }}>
+                {customer ? `${customer.firstName} ${customer.lastName}` : "..."}
+              </h1>
+              {!loading && (
+                <span style={{
+                  fontSize: 13, fontWeight: 700, borderRadius: 20, padding: "2px 11px",
+                  color: "#3b82f6", background: "rgba(59,130,246,.1)",
+                  border: "1px solid rgba(59,130,246,.25)",
+                }}>{shops.length} ຮ້ານ</span>
+              )}
+            </div>
             <p style={{ fontSize: 14, color: "var(--text-2)" }}>{customer?.phone}</p>
           </div>
         </div>
@@ -310,7 +363,7 @@ export default function CustomerShops() {
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
                   <tr style={{ borderBottom: "1px solid var(--border)", background: "var(--surf2)" }}>
-                    {["ຊື່ຮ້ານ", "ອີເມວ", "ແພັກເກດ", "ສະຖານະ", "ໝົດອາຍຸ", ""].map(h => (
+                    {["ຊື່ຮ້ານ", "ອີເມວ", "ແພັກເກດ", "ສະຖານະ", "ວັນເລີ່ມໃຊ້", "ໝົດອາຍຸ", "ໃຊ້ລ່າສຸດ", ""].map(h => (
                       <th key={h} style={{
                         padding: "11px 20px", textAlign: "left",
                         fontSize: 12, fontWeight: 600, letterSpacing: ".05em",
@@ -339,7 +392,20 @@ export default function CustomerShops() {
                           }}>{cfg.label}</span>
                         </td>
                         <td style={{ padding: "14px 20px", color: "var(--muted)", fontSize: 13, whiteSpace: "nowrap" }}>
-                          {s.expiresAt ? s.expiresAt.toLocaleDateString("en-GB") : "—"}
+                          {s.createdAt.toLocaleDateString("en-GB")}
+                        </td>
+                        <td style={{ padding: "14px 20px", fontSize: 13, whiteSpace: "nowrap", color: s.plan === "unlimited" ? "var(--green)" : "var(--muted)", fontWeight: s.plan === "unlimited" ? 600 : 400 }}>
+                          {s.plan === "unlimited" ? "♾ ບໍ່ຈຳກັດ" : s.expiresAt ? s.expiresAt.toLocaleDateString("en-GB") : "—"}
+                        </td>
+                        <td style={{ padding: "14px 20px", color: "var(--muted)", fontSize: 13, whiteSpace: "nowrap" }}>
+                          {s.lastActive === undefined ? "..." : s.lastActive ? (
+                            <>
+                              {s.lastActive.toLocaleDateString("en-GB")}
+                              <span style={{ display: "block", fontSize: 11, marginTop: 1 }}>
+                                {s.lastActive.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
+                              </span>
+                            </>
+                          ) : "—"}
                         </td>
                         <td style={{ padding: "14px 20px" }}>
                           <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
@@ -371,6 +437,14 @@ export default function CustomerShops() {
                                 opacity: actionId === s.id ? 0.6 : 1,
                               }}
                             >{s.status === "suspended" ? "ເປີດໃຊ້ງານ" : "ລະງັບ"}</button>
+                            <button
+                              onClick={() => setDeleteShop(s)}
+                              style={{
+                                padding: "5px 12px", borderRadius: 6, fontSize: 12, fontWeight: 500,
+                                border: "1px solid rgba(239,68,68,.3)",
+                                background: "var(--red-bg)", color: "var(--red)", cursor: "pointer",
+                              }}
+                            >ລຶບ</button>
                           </div>
                         </td>
                       </tr>
@@ -543,6 +617,23 @@ export default function CustomerShops() {
           onConfirm={() => doToggleSuspend(suspendShop)}
         />
       )}
+
+      {deleteShop && (
+        <ConfirmDestructiveModal
+          title={`ລຶບຮ້ານ: ${deleteShop.shopName}`}
+          warning={
+            <>
+              ລຶບຮ້ານ <strong>{deleteShop.shopName}</strong> ຈະລົບ account ຮ້ານນີ້ຖາວອນ.{" "}
+              {shops.length === 1
+                ? "ນີ້ເປັນຮ້ານດຽວ — account login ຂອງ user ຈະຖືກລຶບດ້ວຍ."
+                : `user ຍັງມີ ${shops.length - 1} ຮ້ານທີ່ເຫຼືອ — login email ຍັງໃຊ້ໄດ້ຢູ່.`}
+            </>
+          }
+          confirmLabel="ລຶບຮ້ານ"
+          onConfirm={() => doDeleteShop(deleteShop)}
+          onClose={() => setDeleteShop(null)}
+        />
+      )}
     </div>
   );
 }
@@ -557,7 +648,7 @@ function PackagePreview({ pkg }: { pkg: Package }) {
       borderRadius: 8, fontSize: 13,
     }}>
       <span style={{ color: "var(--accent)", fontWeight: 700 }}>
-        {pkg.price === 0 ? "ຟຣີ" : `${pkg.price.toLocaleString()} ₭`}
+        {fmtPrice(pkg.price, pkg.currency)}
       </span>
       <span style={{ color: "var(--text-2)", marginLeft: 8 }}>
         · {pkg.duration} {UNIT_LABELS[pkg.unit]}
@@ -634,7 +725,8 @@ function CreateShopModal({ customerId, packages, ownerEmail, onClose, onCreated 
       }
 
       const plan = unitToPlan(selectedPkg.unit);
-      const expiresAt = Timestamp.fromDate(calcExpiry(selectedPkg.duration, selectedPkg.unit));
+      const expiryDate = calcExpiry(selectedPkg.duration, selectedPkg.unit);
+      const expiresAt = expiryDate ? Timestamp.fromDate(expiryDate) : null;
       const now = serverTimestamp();
       const features = { returnEnabled, returnSummaryEnabled, monthlySummaryEnabled };
 
@@ -715,7 +807,7 @@ function CreateShopModal({ customerId, packages, ownerEmail, onClose, onCreated 
               <select value={packageId} onChange={e => setPackageId(e.target.value)} style={inputStyle}>
                 {packages.map(p => (
                   <option key={p.id} value={p.id}>
-                    {p.name} — {p.price === 0 ? "ຟຣີ" : `${p.price.toLocaleString()} ₭`}
+                    {p.name} — {fmtPrice(p.price, p.currency)}
                   </option>
                 ))}
               </select>
@@ -816,7 +908,8 @@ function SetPlanModal({ shop, packages, onClose, onUpdated }: {
 
   useEffect(() => {
     if (selectedPkg) {
-      setDateStr(calcExpiry(selectedPkg.duration, selectedPkg.unit).toISOString().slice(0, 10));
+      const expiry = calcExpiry(selectedPkg.duration, selectedPkg.unit);
+      setDateStr(expiry ? expiry.toISOString().slice(0, 10) : "");
     }
   }, [packageId]);
 
@@ -834,7 +927,9 @@ function SetPlanModal({ shop, packages, onClose, onUpdated }: {
       batch.update(doc(db, "tenants", shop.id), {
         plan, duration: selectedPkg.duration, packageId: selectedPkg.id,
         status: "active",
-        expiresAt: Timestamp.fromDate(new Date(dateStr + "T23:59:59")),
+        ...(selectedPkg.unit === "unlimited"
+          ? { expiresAt: null }
+          : { expiresAt: Timestamp.fromDate(new Date(dateStr + "T23:59:59")) }),
         updatedAt: serverTimestamp(),
       });
       batch.update(doc(db, "shops", shop.id), {
@@ -885,15 +980,22 @@ function SetPlanModal({ shop, packages, onClose, onUpdated }: {
             <select value={packageId} onChange={e => setPackageId(e.target.value)} style={inputStyle}>
               {packages.map(p => (
                 <option key={p.id} value={p.id}>
-                  {p.name} — {p.price === 0 ? "ຟຣີ" : `${p.price.toLocaleString()} ₭`}
+                  {p.name} — {fmtPrice(p.price, p.currency)}
                 </option>
               ))}
             </select>
             {selectedPkg && <PackagePreview pkg={selectedPkg} />}
           </Field>
-          <Field label="ໝົດອາຍຸ">
-            <input type="date" value={dateStr} onChange={e => setDateStr(e.target.value)} required style={inputStyle} />
-          </Field>
+          {selectedPkg?.unit !== "unlimited" && (
+            <Field label="ໝົດອາຍຸ">
+              <input type="date" value={dateStr} onChange={e => setDateStr(e.target.value)} required style={inputStyle} />
+            </Field>
+          )}
+          {selectedPkg?.unit === "unlimited" && (
+            <div style={{ padding: "10px 14px", marginBottom: 16, background: "rgba(16,185,129,.08)", border: "1px solid rgba(16,185,129,.3)", borderRadius: 8, fontSize: 13, color: "var(--green)", fontWeight: 500 }}>
+              ♾ ແພັກເກດນີ້ບໍ່ມີວັນໝົດອາຍຸ
+            </div>
+          )}
 
           {error && (
             <div style={{ padding: "10px 14px", marginBottom: 16, background: "var(--red-bg)", border: "1px solid rgba(239,68,68,.25)", borderRadius: 8, fontSize: 13, color: "var(--red)" }}>
@@ -924,7 +1026,6 @@ function EditShopModal({ shop, onClose, onSaved }: {
 }) {
   const overlayRef = useRef<HTMLDivElement>(null);
   const [shopName, setShopName] = useState(shop.shopName);
-  const [ownerEmail, setOwnerEmail] = useState(shop.ownerEmail);
   const [status, setStatus] = useState<ShopTenant["status"]>(shop.status);
   const [province, setProvince] = useState("");
   const [district, setDistrict] = useState("");
@@ -956,77 +1057,12 @@ function EditShopModal({ shop, onClose, onSaved }: {
     e.preventDefault();
     setError(""); setBusy(true);
     try {
-      const shopId = shop.id;
-      const newEmail = ownerEmail.trim().toLowerCase();
-      const emailChanged = newEmail !== shop.ownerEmail.toLowerCase();
-
-      if (emailChanged) {
-        const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        const rand = new Uint8Array(16);
-        crypto.getRandomValues(rand);
-        const tempPassword = Array.from(rand, b => chars[b % 62]).join("") + "Aa1!";
-
-        const res = await fetch(
-          `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${import.meta.env.VITE_FIREBASE_API_KEY}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ email: newEmail, password: tempPassword, returnSecureToken: false }),
-          }
-        );
-        const json = await res.json();
-        if (!res.ok) {
-          const code: string = json.error?.message ?? "FAILED";
-          if (code === "EMAIL_EXISTS") throw new Error("ອີເມວນີ້ຖືກໃຊ້ແລ້ວ");
-          throw new Error(code);
-        }
-        const newUid: string = json.localId;
-        const now = serverTimestamp();
-
-        // Get all shops currently owned by old uid
-        const allOwnedSnap = await getDocs(query(collection(db, "tenants"), where("ownerUid", "==", shop.ownerUid)));
-        const remainingIds = allOwnedSnap.docs.map(d => d.id).filter(id => id !== shopId);
-
-        const batch = writeBatch(db);
-        const features = { returnEnabled, returnSummaryEnabled, monthlySummaryEnabled };
-
-        // New user gets only THIS shop
-        batch.set(doc(db, "users", newUid), {
-          role: "customer",
-          shopId,
-          shopIds: [shopId],
-          email: newEmail,
-          createdAt: now,
-        });
-        batch.set(doc(db, "shops", shopId, "users", newUid), { role: "customer", email: newEmail, createdAt: now });
-        batch.delete(doc(db, "shops", shopId, "users", shop.ownerUid));
-
-        // Update only THIS shop's tenant
-        batch.update(doc(db, "tenants", shopId), { shopName: shopName.trim(), ownerEmail: newEmail, ownerUid: newUid, status, updatedAt: now });
-        batch.update(doc(db, "shops", shopId), { name: shopName.trim(), village: village.trim(), district: district.trim(), province: province.trim(), features, updatedAt: now });
-
-        if (remainingIds.length === 0) {
-          // Old user has no more shops → remove their doc
-          batch.delete(doc(db, "users", shop.ownerUid));
-        } else {
-          // Old user keeps remaining shops → update their shopIds
-          batch.update(doc(db, "users", shop.ownerUid), {
-            shopId: remainingIds[0],
-            shopIds: remainingIds,
-          });
-        }
-
-        await batch.commit();
-        await sendPasswordResetEmail(auth, newEmail);
-        onSaved({ ...shop, shopName: shopName.trim(), ownerEmail: newEmail, ownerUid: newUid, status });
-      } else {
-        const features = { returnEnabled, returnSummaryEnabled, monthlySummaryEnabled };
-        const batch = writeBatch(db);
-        batch.update(doc(db, "tenants", shopId), { shopName: shopName.trim(), status, updatedAt: serverTimestamp() });
-        batch.update(doc(db, "shops", shopId), { name: shopName.trim(), village: village.trim(), district: district.trim(), province: province.trim(), features, updatedAt: serverTimestamp() });
-        await batch.commit();
-        onSaved({ ...shop, shopName: shopName.trim(), status });
-      }
+      const features = { returnEnabled, returnSummaryEnabled, monthlySummaryEnabled };
+      const batch = writeBatch(db);
+      batch.update(doc(db, "tenants", shop.id), { shopName: shopName.trim(), status, updatedAt: serverTimestamp() });
+      batch.update(doc(db, "shops", shop.id), { name: shopName.trim(), village: village.trim(), district: district.trim(), province: province.trim(), features, updatedAt: serverTimestamp() });
+      await batch.commit();
+      onSaved({ ...shop, shopName: shopName.trim(), status });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "ເກີດຂໍ້ຜິດພາດ");
     } finally {
@@ -1063,14 +1099,23 @@ function EditShopModal({ shop, onClose, onSaved }: {
           <Field label="ຊື່ຮ້ານ" required>
             <input type="text" value={shopName} onChange={e => setShopName(e.target.value)} required style={inputStyle} />
           </Field>
-          <Field label="ອີເມວ" required>
-            <input type="email" value={ownerEmail} onChange={e => setOwnerEmail(e.target.value)} required style={inputStyle} />
-            {ownerEmail.trim().toLowerCase() !== shop.ownerEmail.toLowerCase() && (
-              <div style={{ marginTop: 6, fontSize: 12, color: "var(--yellow)" }}>
-                ⚠️ ປ່ຽນ email — Firebase ຈະສົ່ງ reset ລະຫັດໄປ email ໃໝ່ທັນທີ
-              </div>
-            )}
-          </Field>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-2)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              ອີເມວ
+            </div>
+            <div style={{
+              ...inputStyle,
+              background: "var(--surf2)",
+              color: "var(--muted)",
+              userSelect: "all",
+              cursor: "default",
+            }}>
+              {shop.ownerEmail}
+            </div>
+            <div style={{ marginTop: 5, fontSize: 11, color: "var(--muted)" }}>
+              ອີເມວຂອງ user ນີ້ — ແກ້ໄຂໄດ້ຜ່ານໜ້າ ລູກຄ້າ
+            </div>
+          </div>
           <LaoAddressSelect
             province={province} district={district} village={village}
             onProvinceChange={setProvince} onDistrictChange={setDistrict} onVillageChange={setVillage}
@@ -1275,7 +1320,7 @@ function AddPaymentModal({ customerId, shops, packages, onClose, onCreated }: {
                 <option value="">— ເລືອກແພັກເກດ —</option>
                 {packages.map(p => (
                   <option key={p.id} value={p.id}>
-                    {p.name} — {p.price === 0 ? "ຟຣີ" : `${p.price.toLocaleString()} ₭`}
+                    {p.name} — {fmtPrice(p.price, p.currency)}
                   </option>
                 ))}
               </select>
@@ -1476,7 +1521,7 @@ function EditPaymentModal({ customerId, payment, shops, packages, onClose, onSav
               <select value={packageId} onChange={e => setPackageId(e.target.value)} style={inputStyle}>
                 <option value="">— ເລືອກແພັກເກດ —</option>
                 {packages.map(p => (
-                  <option key={p.id} value={p.id}>{p.name} — {p.price === 0 ? "ຟຣີ" : `${p.price.toLocaleString()} ₭`}</option>
+                  <option key={p.id} value={p.id}>{p.name} — {fmtPrice(p.price, p.currency)}</option>
                 ))}
               </select>
               {selectedPkg && <PackagePreview pkg={selectedPkg} />}

@@ -5,17 +5,29 @@ import {
 } from "firebase/firestore";
 import { db } from "../firebase";
 
+export type Currency = "LAK" | "THB" | "USD" | "VND";
+
 export interface Package {
   id: string;
   name: string;
   price: number;
+  currency: Currency;
   duration: number;
-  unit: "day" | "month" | "year";
+  unit: "day" | "month" | "year" | "unlimited";
   active: boolean;
   order: number;
 }
 
-export const UNIT_LABELS: Record<string, string> = { day: "ວັນ", month: "ເດືອນ", year: "ປີ" };
+export const UNIT_LABELS: Record<string, string> = { day: "ວັນ", month: "ເດືອນ", year: "ປີ", unlimited: "ບໍ່ຈຳກັດ" };
+
+export const CURRENCY_SYMBOLS: Record<Currency, string> = { LAK: "₭", THB: "฿", USD: "$", VND: "₫" };
+
+export function fmtPrice(price: number, currency: Currency = "LAK"): string {
+  if (price === 0) return "ຟຣີ";
+  const sym = CURRENCY_SYMBOLS[currency];
+  const num = price.toLocaleString();
+  return currency === "USD" ? `${sym}${num}` : `${num} ${sym}`;
+}
 
 export default function PackageSettings() {
   const [packages, setPackages] = useState<Package[]>([]);
@@ -32,6 +44,7 @@ export default function PackageSettings() {
         id: d.id,
         name: d.data().name ?? "",
         price: d.data().price ?? 0,
+        currency: (d.data().currency as Currency) ?? "LAK",
         duration: d.data().duration ?? 1,
         unit: d.data().unit ?? "month",
         active: d.data().active ?? true,
@@ -111,10 +124,10 @@ export default function PackageSettings() {
                       {pkg.name}
                     </td>
                     <td style={{ padding: "14px 20px", fontWeight: 700, color: "#10b981" }}>
-                      {pkg.price === 0 ? "ຟຣີ" : `${pkg.price.toLocaleString()} ₭`}
+                      {fmtPrice(pkg.price, pkg.currency)}
                     </td>
                     <td style={{ padding: "14px 20px", color: "var(--text-2)", fontSize: 13 }}>
-                      {pkg.duration} {UNIT_LABELS[pkg.unit]}
+                      {pkg.unit === "unlimited" ? "ບໍ່ຈຳກັດ" : `${pkg.duration} ${UNIT_LABELS[pkg.unit]}`}
                     </td>
                     <td style={{ padding: "14px 20px" }}>
                       <span style={{
@@ -190,8 +203,9 @@ function PackageModal({ pkg, nextOrder, onClose, onSaved }: {
   const overlayRef = useRef<HTMLDivElement>(null);
   const [name, setName] = useState(pkg?.name ?? "");
   const [price, setPrice] = useState(pkg ? String(pkg.price) : "");
+  const [currency, setCurrency] = useState<Currency>(pkg?.currency ?? "LAK");
   const [duration, setDuration] = useState(pkg ? String(pkg.duration) : "1");
-  const [unit, setUnit] = useState<"day" | "month" | "year">(pkg?.unit ?? "month");
+  const [unit, setUnit] = useState<Package["unit"]>(pkg?.unit ?? "month");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -206,7 +220,8 @@ function PackageModal({ pkg, nextOrder, onClose, onSaved }: {
       const data = {
         name: name.trim(),
         price: parseFloat(price) || 0,
-        duration: parseInt(duration) || 1,
+        currency,
+        duration: unit === "unlimited" ? 0 : parseInt(duration) || 1,
         unit,
         active: pkg?.active ?? true,
         order: pkg?.order ?? nextOrder,
@@ -253,21 +268,28 @@ function PackageModal({ pkg, nextOrder, onClose, onSaved }: {
           <Field label="ຊື່ແພັກເກດ" required>
             <input type="text" value={name} onChange={e => setName(e.target.value)} required style={inputStyle} placeholder="ເຊັ່ນ: ລາຍເດືອນ Basic" />
           </Field>
-          <Field label="ລາຄາ (₭)">
-            <input type="number" min="0" step="1000" value={price} onChange={e => setPrice(e.target.value)} style={inputStyle} placeholder="0 = ຟຣີ" />
-          </Field>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
-            <Field label="ໄລຍະ" required>
-              <input type="number" min="1" value={duration} onChange={e => setDuration(e.target.value)} required style={inputStyle} />
-            </Field>
-            <Field label="ໜ່ວຍ">
-              <select value={unit} onChange={e => setUnit(e.target.value as typeof unit)} style={inputStyle}>
-                <option value="day">ວັນ</option>
-                <option value="month">ເດືອນ</option>
-                <option value="year">ປີ</option>
+          <Field label="ລາຄາ">
+            <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8 }}>
+              <input type="number" min="0" step="any" value={price} onChange={e => setPrice(e.target.value)} style={inputStyle} placeholder="0 = ຟຣີ" />
+              <select value={currency} onChange={e => setCurrency(e.target.value as Currency)} style={{ ...inputStyle, width: "auto", paddingRight: 28 }}>
+                <option value="LAK">₭ ກີບ</option>
+                <option value="THB">฿ ບາດ</option>
+                <option value="USD">$ ດໍລ່າ</option>
+                <option value="VND">₫ ດົງ</option>
               </select>
-            </Field>
-          </div>
+            </div>
+          </Field>
+          <Field label="ໜ່ວຍ / ໄລຍະ">
+            <select value={unit} onChange={e => setUnit(e.target.value as Package["unit"])} style={{ ...inputStyle, marginBottom: unit === "unlimited" ? 0 : 8 }}>
+              <option value="day">ວັນ</option>
+              <option value="month">ເດືອນ</option>
+              <option value="year">ປີ</option>
+              <option value="unlimited">♾ ບໍ່ຈຳກັດ (Unlimited)</option>
+            </select>
+            {unit !== "unlimited" && (
+              <input type="number" min="1" value={duration} onChange={e => setDuration(e.target.value)} required style={inputStyle} placeholder="ຈຳນວນ" />
+            )}
+          </Field>
 
           {error && (
             <div style={{ padding: "10px 14px", marginBottom: 16, background: "var(--red-bg)", border: "1px solid rgba(239,68,68,.25)", borderRadius: 8, fontSize: 13, color: "var(--red)" }}>
