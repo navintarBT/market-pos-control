@@ -676,6 +676,7 @@ function CreateShopModal({ customerId, packages, ownerEmail, onClose, onCreated 
   const [returnEnabled, setReturnEnabled] = useState(false);
   const [returnSummaryEnabled, setReturnSummaryEnabled] = useState(false);
   const [monthlySummaryEnabled, setMonthlySummaryEnabled] = useState(false);
+  const [ledgerEnabled, setLedgerEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -728,7 +729,7 @@ function CreateShopModal({ customerId, packages, ownerEmail, onClose, onCreated 
       const expiryDate = calcExpiry(selectedPkg.duration, selectedPkg.unit);
       const expiresAt = expiryDate ? Timestamp.fromDate(expiryDate) : null;
       const now = serverTimestamp();
-      const features = { returnEnabled, returnSummaryEnabled, monthlySummaryEnabled };
+      const features = { returnEnabled, returnSummaryEnabled, monthlySummaryEnabled, ledgerEnabled };
 
       const batch = writeBatch(db);
 
@@ -839,6 +840,7 @@ function CreateShopModal({ customerId, packages, ownerEmail, onClose, onCreated 
                 { key: "returnEnabled" as const,        label: "ຮັບຕີກັບສິນຄ້າ",      value: returnEnabled,        setter: setReturnEnabled },
                 { key: "returnSummaryEnabled" as const,  label: "ສະຫຼຸບຍອດ",           value: returnSummaryEnabled,  setter: setReturnSummaryEnabled },
                 { key: "monthlySummaryEnabled" as const, label: "ສະຫຼຸບປະຈຳເດືອນ",    value: monthlySummaryEnabled, setter: setMonthlySummaryEnabled },
+                { key: "ledgerEnabled" as const,         label: "ບັນຊີລາຍຮັບລາຍຈ່າຍ / ສະຫຼຸບບັນຊີ", value: ledgerEnabled, setter: setLedgerEnabled },
               ]).map(f => (
                 <label key={f.key} style={{
                   display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -1025,6 +1027,7 @@ function EditShopModal({ shop, onClose, onSaved }: {
   onSaved: (updated: ShopTenant) => void;
 }) {
   const overlayRef = useRef<HTMLDivElement>(null);
+  const [tab, setTab] = useState<"info" | "settings">("info");
   const [shopName, setShopName] = useState(shop.shopName);
   const [status, setStatus] = useState<ShopTenant["status"]>(shop.status);
   const [province, setProvince] = useState("");
@@ -1033,6 +1036,7 @@ function EditShopModal({ shop, onClose, onSaved }: {
   const [returnEnabled, setReturnEnabled] = useState(false);
   const [returnSummaryEnabled, setReturnSummaryEnabled] = useState(false);
   const [monthlySummaryEnabled, setMonthlySummaryEnabled] = useState(false);
+  const [ledgerEnabled, setLedgerEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -1046,6 +1050,7 @@ function EditShopModal({ shop, onClose, onSaved }: {
       setReturnEnabled(d.features?.returnEnabled ?? false);
       setReturnSummaryEnabled(d.features?.returnSummaryEnabled ?? false);
       setMonthlySummaryEnabled(d.features?.monthlySummaryEnabled ?? false);
+      setLedgerEnabled(d.features?.ledgerEnabled ?? false);
     }).catch(() => {});
   }, [shop.id]);
 
@@ -1057,7 +1062,7 @@ function EditShopModal({ shop, onClose, onSaved }: {
     e.preventDefault();
     setError(""); setBusy(true);
     try {
-      const features = { returnEnabled, returnSummaryEnabled, monthlySummaryEnabled };
+      const features = { returnEnabled, returnSummaryEnabled, monthlySummaryEnabled, ledgerEnabled };
       const batch = writeBatch(db);
       batch.update(doc(db, "tenants", shop.id), { shopName: shopName.trim(), status, updatedAt: serverTimestamp() });
       batch.update(doc(db, "shops", shop.id), { name: shopName.trim(), village: village.trim(), district: district.trim(), province: province.trim(), features, updatedAt: serverTimestamp() });
@@ -1095,72 +1100,100 @@ function EditShopModal({ shop, onClose, onSaved }: {
           </button>
         </div>
 
+        <div style={{ display: "flex", gap: 4, padding: "16px 24px 0" }}>
+          {([
+            { key: "info" as const, label: "ຂໍ້ມູນຮ້ານ" },
+            { key: "settings" as const, label: "ຕັ້ງຄ່າ" },
+          ]).map(t => (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => setTab(t.key)}
+              style={{
+                padding: "8px 16px", borderRadius: "8px 8px 0 0", border: "none",
+                borderBottom: `2px solid ${tab === t.key ? "var(--accent)" : "transparent"}`,
+                background: "none",
+                color: tab === t.key ? "var(--accent)" : "var(--text-2)",
+                fontSize: 13, fontWeight: 600, cursor: "pointer",
+              }}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
         <form onSubmit={handleSubmit} style={{ padding: "24px", overflowY: "auto", maxHeight: "calc(90vh - 80px)" }}>
-          <Field label="ຊື່ຮ້ານ" required>
-            <input type="text" value={shopName} onChange={e => setShopName(e.target.value)} required style={inputStyle} />
-          </Field>
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-2)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-              ອີເມວ
-            </div>
-            <div style={{
-              ...inputStyle,
-              background: "var(--surf2)",
-              color: "var(--muted)",
-              userSelect: "all",
-              cursor: "default",
-            }}>
-              {shop.ownerEmail}
-            </div>
-            <div style={{ marginTop: 5, fontSize: 11, color: "var(--muted)" }}>
-              ອີເມວຂອງ user ນີ້ — ແກ້ໄຂໄດ້ຜ່ານໜ້າ ລູກຄ້າ
-            </div>
-          </div>
-          <LaoAddressSelect
-            province={province} district={district} village={village}
-            onProvinceChange={setProvince} onDistrictChange={setDistrict} onVillageChange={setVillage}
-          />
-          <Field label="ສະຖານະ">
-            <select value={status} onChange={e => setStatus(e.target.value as ShopTenant["status"])} style={inputStyle}>
-              <option value="active">ໃຊ້ງານ</option>
-              <option value="trial">ທົດລອງໃຊ້</option>
-              <option value="suspended">ລະງັບ</option>
-              <option value="cancelled">ຍົກເລີກ</option>
-            </select>
-          </Field>
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", marginBottom: 10 }}>ຟີເຈີ</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {([
-                { key: "returnEnabled" as const,        label: "ຮັບຕີກັບສິນຄ້າ",   value: returnEnabled,        setter: setReturnEnabled },
-                { key: "returnSummaryEnabled" as const,  label: "ສະຫຼຸບຍອດ",        value: returnSummaryEnabled,  setter: setReturnSummaryEnabled },
-                { key: "monthlySummaryEnabled" as const, label: "ສະຫຼຸບປະຈຳເດືອນ", value: monthlySummaryEnabled, setter: setMonthlySummaryEnabled },
-              ]).map(f => (
-                <label key={f.key} style={{
-                  display: "flex", alignItems: "center", justifyContent: "space-between",
-                  padding: "10px 14px", borderRadius: 8,
-                  border: `1.5px solid ${f.value ? "rgba(14,165,160,.35)" : "var(--border)"}`,
-                  background: f.value ? "var(--accent-bg)" : "var(--surf2)",
-                  cursor: "pointer",
+          {tab === "info" ? (
+            <>
+              <Field label="ຊື່ຮ້ານ" required>
+                <input type="text" value={shopName} onChange={e => setShopName(e.target.value)} required style={inputStyle} />
+              </Field>
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-2)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                  ອີເມວ
+                </div>
+                <div style={{
+                  ...inputStyle,
+                  background: "var(--surf2)",
+                  color: "var(--muted)",
+                  userSelect: "all",
+                  cursor: "default",
                 }}>
-                  <span style={{ fontSize: 13, fontWeight: 500, color: f.value ? "var(--accent)" : "var(--text-2)" }}>
-                    {f.label}
-                  </span>
-                  <div onClick={() => f.setter(!f.value)} style={{
-                    width: 40, height: 22, borderRadius: 11, position: "relative",
-                    background: f.value ? "var(--accent)" : "var(--border)",
-                    transition: "background .2s", cursor: "pointer", flexShrink: 0,
+                  {shop.ownerEmail}
+                </div>
+                <div style={{ marginTop: 5, fontSize: 11, color: "var(--muted)" }}>
+                  ອີເມວຂອງ user ນີ້ — ແກ້ໄຂໄດ້ຜ່ານໜ້າ ລູກຄ້າ
+                </div>
+              </div>
+              <LaoAddressSelect
+                province={province} district={district} village={village}
+                onProvinceChange={setProvince} onDistrictChange={setDistrict} onVillageChange={setVillage}
+              />
+              <Field label="ສະຖານະ">
+                <select value={status} onChange={e => setStatus(e.target.value as ShopTenant["status"])} style={inputStyle}>
+                  <option value="active">ໃຊ້ງານ</option>
+                  <option value="trial">ທົດລອງໃຊ້</option>
+                  <option value="suspended">ລະງັບ</option>
+                  <option value="cancelled">ຍົກເລີກ</option>
+                </select>
+              </Field>
+            </>
+          ) : (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", marginBottom: 10 }}>ຟີເຈີ</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {([
+                  { key: "returnEnabled" as const,        label: "ຮັບຕີກັບສິນຄ້າ",   value: returnEnabled,        setter: setReturnEnabled },
+                  { key: "returnSummaryEnabled" as const,  label: "ສະຫຼຸບຍອດ",        value: returnSummaryEnabled,  setter: setReturnSummaryEnabled },
+                  { key: "monthlySummaryEnabled" as const, label: "ສະຫຼຸບປະຈຳເດືອນ", value: monthlySummaryEnabled, setter: setMonthlySummaryEnabled },
+                  { key: "ledgerEnabled" as const,         label: "ບັນຊີລາຍຮັບລາຍຈ່າຍ / ສະຫຼຸບບັນຊີ", value: ledgerEnabled, setter: setLedgerEnabled },
+                ]).map(f => (
+                  <label key={f.key} style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    padding: "10px 14px", borderRadius: 8,
+                    border: `1.5px solid ${f.value ? "rgba(14,165,160,.35)" : "var(--border)"}`,
+                    background: f.value ? "var(--accent-bg)" : "var(--surf2)",
+                    cursor: "pointer",
                   }}>
-                    <div style={{
-                      position: "absolute", top: 3, left: f.value ? 21 : 3,
-                      width: 16, height: 16, borderRadius: "50%", background: "#fff",
-                      transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,.2)",
-                    }}/>
-                  </div>
-                </label>
-              ))}
+                    <span style={{ fontSize: 13, fontWeight: 500, color: f.value ? "var(--accent)" : "var(--text-2)" }}>
+                      {f.label}
+                    </span>
+                    <div onClick={() => f.setter(!f.value)} style={{
+                      width: 40, height: 22, borderRadius: 11, position: "relative",
+                      background: f.value ? "var(--accent)" : "var(--border)",
+                      transition: "background .2s", cursor: "pointer", flexShrink: 0,
+                    }}>
+                      <div style={{
+                        position: "absolute", top: 3, left: f.value ? 21 : 3,
+                        width: 16, height: 16, borderRadius: "50%", background: "#fff",
+                        transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,.2)",
+                      }}/>
+                    </div>
+                  </label>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
           {error && (
             <div style={{ padding: "10px 14px", marginBottom: 16, background: "var(--red-bg)", border: "1px solid rgba(239,68,68,.25)", borderRadius: 8, fontSize: 13, color: "var(--red)" }}>
